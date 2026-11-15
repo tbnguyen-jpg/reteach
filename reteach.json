@@ -1,0 +1,650 @@
+{
+  "name": "ReTeach: one assignment, personal paths",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "ReTeach: one assignment, personal paths",
+        "formDescription": "Upload last quiz results. ReTeach finds what the whole class shares, what small groups need, and drafts one assignment with personal side quests for your approval.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Course topic",
+              "placeholder": "e.g. Calculus I, derivative rules",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Teacher email",
+              "fieldType": "email",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Quiz questions",
+              "fieldType": "textarea",
+              "placeholder": "Paste the quiz questions and answer choices (Q1..Qn)"
+            },
+            {
+              "fieldLabel": "Quiz results CSV",
+              "fieldType": "file",
+              "multipleFiles": false,
+              "acceptFileTypes": ".csv",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {
+          "appendAttribution": false,
+          "respondWithOptions": {
+            "values": {
+              "formSubmittedText": "Got it! ReTeach is analyzing your class. Check your email for the draft plan."
+            }
+          }
+        }
+      },
+      "name": "Teacher Upload Form",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        0,
+        300
+      ],
+      "id": "407fb7cb-eff4-4eef-917f-5de001c14118"
+    },
+    {
+      "parameters": {
+        "binaryPropertyName": "={{ Object.keys($binary)[0] }}",
+        "options": {
+          "headerRow": true
+        }
+      },
+      "name": "Read Quiz CSV",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.2,
+      "position": [
+        220,
+        300
+      ],
+      "id": "0e9bf63a-bffe-47d7-a00c-aa9f4d44984a"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(i => i.json);\nconst keyRow = rows.find(r => String(r.student || '').trim().toLowerCase() === 'answer_key');\nif (!keyRow) { throw new Error('CSV needs a row whose student column is answer_key'); }\nconst qCols = Object.keys(keyRow).filter(k => /^Q\\d+$/i.test(k));\nconst norm = v => String(v ?? '').trim().toUpperCase();\nconst students = rows.filter(r => r !== keyRow && String(r.student || '').trim() !== '');\nconst n = Math.max(students.length, 1);\nconst keyCounts = {};\nconst roster = students.map((r, idx) => {\n  const id = 'Student_' + String(idx + 1).padStart(2, '0');\n  let correct = 0;\n  const mistakes = [];\n  for (const q of qCols) {\n    const a = norm(r[q]);\n    if (a === norm(keyRow[q])) { correct++; }\n    else { const k = q + ':' + (a || 'blank'); mistakes.push(k); keyCounts[k] = (keyCounts[k] || 0) + 1; }\n  }\n  return { id, name: String(r.student).trim(), percent: Math.round(100 * correct / Math.max(qCols.length, 1)), mistakes };\n});\nconst CLASS_WIDE = 0.3;\nconst groups = Object.entries(keyCounts).map(e => {\n  const k = e[0], c = e[1];\n  const scope = c / n >= CLASS_WIDE ? 'class-wide' : (c >= 2 ? 'small-group' : 'individual');\n  return { key: k, question: k.split(':')[0], wrong_choice: k.split(':')[1], correct_choice: norm(keyRow[k.split(':')[0]]), students: c, percent: Math.round(100 * c / n), scope };\n}).sort((a, b) => b.students - a.students);\nconst scopeOf = {};\ngroups.forEach(g => { scopeOf[g.key] = g.scope; });\nconst individualQs = [...new Set(groups.filter(g => g.scope === 'individual').map(g => g.question))];\nconst questions = qCols.map(q => {\n  const key = norm(keyRow[q]);\n  const right = students.filter(r => norm(r[q]) === key).length;\n  return { question: q, correct_answer: key, percent_correct: Math.round(100 * right / n) };\n}).sort((a, b) => a.percent_correct - b.percent_correct);\nconst form = $('Teacher Upload Form').first().json;\nreturn [{ json: {\n  course: form['Course topic'] || 'the course',\n  teacherEmail: form['Teacher email'] || '',\n  questionText: form['Quiz questions'] || '',\n  studentCount: students.length,\n  classAverage: Math.round(roster.reduce((s, x) => s + x.percent, 0) / n),\n  questions,\n  misconceptionGroups: groups.filter(g => g.scope !== 'individual'),\n  individualErrorQuestions: individualQs,\n  individualErrorStudents: roster.filter(s => s.mistakes.some(k => scopeOf[k] === 'individual')).length,\n  masteredStudents: roster.filter(s => s.mistakes.length === 0).length,\n  roster: roster.map(s => ({ id: s.id, name: s.name, percent: s.percent, mistakes: s.mistakes, scopes: s.mistakes.map(k => scopeOf[k]) }))\n} }];\n"
+      },
+      "name": "Anonymize & Group by Misconception",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        300
+      ],
+      "id": "271946db-2a4d-402d-a914-aea731081ac6"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Course: {{ $json.course }}. {{ $json.studentCount }} students, average {{ $json.classAverage }}%.\n\nQuiz questions:\n{{ $json.questionText }}\n\nMisconception groups (key = question:wrong choice; scope class-wide = 30%+ of class, small-group = 2+ students):\n{{ JSON.stringify($json.misconceptionGroups, null, 2) }}\n\nQuestions with one-off individual errors: {{ $json.individualErrorQuestions.join(\", \") }} ({{ $json.individualErrorStudents }} students). Students with no mistakes: {{ $json.masteredStudents }}.",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are an expert teacher and learning scientist. For EVERY misconception group listed, explain the specific wrong mental model that makes a student pick that wrong choice, using the question text. Keep each group key and scope exactly as given. Do not drop small groups: the minority matters as much as the majority. Cite counts and percentages as evidence. Students are anonymized; never invent names."
+        }
+      },
+      "name": "Diagnose Misconceptions",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        660,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000,
+      "id": "0faa50b7-fc67-4a9a-a5bf-add8be61949a"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-4o-mini"
+        },
+        "responsesApiEnabled": false,
+        "options": {
+          "temperature": 0.2
+        }
+      },
+      "name": "Diagnosis Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        560,
+        520
+      ],
+      "credentials": {
+        "openAiApi": {
+          "name": "OpenAI account"
+        }
+      },
+      "id": "a7c939b8-2f2e-43f6-b530-e52de418959c"
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{ \"class_summary\": \"One sentence: what the class shares vs what small groups need\", \"misconceptions\": [ { \"key\": \"Q4:B\", \"scope\": \"class-wide\", \"students\": 17, \"concept\": \"Mass vs weight\", \"likely_misconception\": \"Mass changes with gravity\", \"evidence\": \"68% chose B\" } ] }"
+      },
+      "name": "Diagnosis Format",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        720,
+        520
+      ],
+      "id": "de086af5-d5b5-429e-aa23-4ae20d675537"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Course: {{ $(\"Anonymize & Group by Misconception\").first().json.course }}\nQuiz questions:\n{{ $(\"Anonymize & Group by Misconception\").first().json.questionText }}\n\nDiagnosis:\n{{ JSON.stringify($(\"Diagnose Misconceptions\").first().json.output, null, 2) }}\n\nQuestions with one-off individual errors: {{ $(\"Anonymize & Group by Misconception\").first().json.individualErrorQuestions.join(\", \") }}. Students with no mistakes: {{ $(\"Anonymize & Group by Misconception\").first().json.masteredStudents }}.\n\n{{ $json.feedback ? \"The teacher reviewed your previous draft and asked for changes. Apply this feedback exactly: \" + $json.feedback + \"\\n\\nPrevious draft:\\n\" + $json.previousDraft : \"Write the first draft.\" }}",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "Design ONE assignment with personal paths, so no student gets a one-size-fits-all worksheet. 1) core_mission: 4 story steps that EVERY student does; target only the class-wide misconceptions; list their keys in targets. 2) side_quests: one short quest (2 steps) for each small-group misconception (you may merge keys of the same concept); targets must contain the exact keys. If there are one-off individual errors, add one quest named \"Personal Review\" with targets [\"individual\"] covering those questions. 3) challenge_extension: 2 harder transfer steps if any students had no mistakes. Story: each step has a story_beat and a correct answer moves the story forward. Every step has 4 choices with exactly one is_correct=true. Each wrong choice must embody a REAL misconception (reuse the diagnosed ones) and its feedback explains in one or two friendly sentences why that thinking fails, tied to the story. Never phrase questions in a way that assumes the misconception (e.g. never say someone weighs X kg when you mean mass). teacher_note: 1-2 sentences citing the data."
+        }
+      },
+      "name": "Write Core Mission + Side Quests",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1060,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "id": "27822875-2c35-4146-b809-8b02511f8a15"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-4o"
+        },
+        "responsesApiEnabled": false,
+        "options": {
+          "temperature": 0.5
+        }
+      },
+      "name": "Writer Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        980,
+        520
+      ],
+      "credentials": {
+        "openAiApi": {
+          "name": "OpenAI account"
+        }
+      },
+      "id": "fc55bed4-fc5f-471e-9214-06fecd0f4341"
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{ \"title\": \"Mission: Stranded on the Moon\", \"story_intro\": \"...\", \"teacher_note\": \"Why this design, citing the data\", \"core_mission\": { \"targets\": [\"Q4:B\", \"Q6:A\"], \"steps\": [ { \"story_beat\": \"The rover's scale flickers on...\", \"prompt\": \"...\", \"choices\": [ { \"label\": \"A\", \"text\": \"...\", \"is_correct\": true, \"feedback\": \"Why this is right\" }, { \"label\": \"B\", \"text\": \"...\", \"is_correct\": false, \"feedback\": \"Picked B? That is the mass-vs-weight trap: ...\" } ] } ] }, \"side_quests\": [ { \"name\": \"Balanced Forces Repair\", \"targets\": [\"Q2:D\", \"Q2:B\"], \"for_whom\": \"5 students who think constant velocity needs a net force\", \"steps\": [ { \"story_beat\": \"The rover's scale flickers on...\", \"prompt\": \"...\", \"choices\": [ { \"label\": \"A\", \"text\": \"...\", \"is_correct\": true, \"feedback\": \"Why this is right\" }, { \"label\": \"B\", \"text\": \"...\", \"is_correct\": false, \"feedback\": \"Picked B? That is the mass-vs-weight trap: ...\" } ] } ] } ], \"challenge_extension\": { \"steps\": [ { \"story_beat\": \"The rover's scale flickers on...\", \"prompt\": \"...\", \"choices\": [ { \"label\": \"A\", \"text\": \"...\", \"is_correct\": true, \"feedback\": \"Why this is right\" }, { \"label\": \"B\", \"text\": \"...\", \"is_correct\": false, \"feedback\": \"Picked B? That is the mass-vs-weight trap: ...\" } ] } ] } }"
+      },
+      "name": "Assignment Format",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        1140,
+        520
+      ],
+      "id": "f4185e6f-2d7b-493b-863f-84055d0d2fbc"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Course: {{ $(\"Anonymize & Group by Misconception\").first().json.course }}\n\nDraft assignment to verify:\n{{ JSON.stringify($json.output, null, 2) }}",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are a strict subject-matter reviewer. Check every step in core_mission, side_quests and challenge_extension: (1) the content is factually correct; (2) exactly one choice is correct and is_correct marks it; (3) no other choice is also defensible; (4) the wording never states or assumes the misconception it targets (for example, using kg for weight); (5) each wrong-choice feedback correctly explains the error. Fix every problem directly. Return the FULL corrected assignment with the same structure, keys, names and targets, plus checks: a short list describing each fix you made (empty list if none)."
+        }
+      },
+      "name": "Self-Check Accuracy",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1440,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "id": "4a6de29c-3aaa-426b-8bc3-ee0d6cc1b582"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "gpt-4o"
+        },
+        "responsesApiEnabled": false,
+        "options": {
+          "temperature": 0
+        }
+      },
+      "name": "Checker Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        1360,
+        520
+      ],
+      "credentials": {
+        "openAiApi": {
+          "name": "OpenAI account"
+        }
+      },
+      "id": "21110f83-5073-4dfc-ba6a-68545eeb075f"
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{ \"title\": \"Mission: Stranded on the Moon\", \"story_intro\": \"...\", \"teacher_note\": \"Why this design, citing the data\", \"core_mission\": { \"targets\": [\"Q4:B\", \"Q6:A\"], \"steps\": [ { \"story_beat\": \"The rover's scale flickers on...\", \"prompt\": \"...\", \"choices\": [ { \"label\": \"A\", \"text\": \"...\", \"is_correct\": true, \"feedback\": \"Why this is right\" }, { \"label\": \"B\", \"text\": \"...\", \"is_correct\": false, \"feedback\": \"Picked B? That is the mass-vs-weight trap: ...\" } ] } ] }, \"side_quests\": [ { \"name\": \"Balanced Forces Repair\", \"targets\": [\"Q2:D\", \"Q2:B\"], \"for_whom\": \"5 students who think constant velocity needs a net force\", \"steps\": [ { \"story_beat\": \"The rover's scale flickers on...\", \"prompt\": \"...\", \"choices\": [ { \"label\": \"A\", \"text\": \"...\", \"is_correct\": true, \"feedback\": \"Why this is right\" }, { \"label\": \"B\", \"text\": \"...\", \"is_correct\": false, \"feedback\": \"Picked B? That is the mass-vs-weight trap: ...\" } ] } ] } ], \"challenge_extension\": { \"steps\": [ { \"story_beat\": \"The rover's scale flickers on...\", \"prompt\": \"...\", \"choices\": [ { \"label\": \"A\", \"text\": \"...\", \"is_correct\": true, \"feedback\": \"Why this is right\" }, { \"label\": \"B\", \"text\": \"...\", \"is_correct\": false, \"feedback\": \"Picked B? That is the mass-vs-weight trap: ...\" } ] } ] } , \"checks\": [\"Core step 2: answer key was wrong, fixed to C\"] }"
+      },
+      "name": "Checked Format",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        1520,
+        520
+      ],
+      "id": "9bfcf04e-7e61-401b-a2b8-a3f6dd16e352"
+    },
+    {
+      "parameters": {
+        "jsCode": "const a = $input.first().json.output || {};\nconst info = $('Anonymize & Group by Misconception').first().json;\nconst diag = $('Diagnose Misconceptions').first().json.output || {};\nconst esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst quests = Array.isArray(a.side_quests) ? a.side_quests : [];\nconst stepsText = steps => (steps || []).map((s, i) => {\n  let t = (i + 1) + '. ' + (s.story_beat ? '[' + s.story_beat + '] ' : '') + s.prompt + '\\n';\n  (s.choices || []).forEach(c => { t += '   ' + c.label + ') ' + c.text + (c.is_correct ? '  <- correct' : '') + '\\n      feedback: ' + c.feedback + '\\n'; });\n  return t;\n}).join('');\nconst stepsHtml = steps => '<ol>' + (steps || []).map(s => '<li><p><em>' + esc(s.story_beat) + '</em></p><p>' + esc(s.prompt) + '</p><p>' + (s.choices || []).map(c => esc(c.label + ') ' + c.text)).join('<br>') + '</p></li>').join('') + '</ol>';\nconst questFor = key => quests.find(q => (q.targets || []).includes(key));\nconst personal = quests.find(q => (q.targets || []).includes('individual'));\nconst plan = info.roster.map(s => {\n  const items = ['Core Mission'];\n  s.mistakes.forEach((k, i) => {\n    const sc = s.scopes[i];\n    if (sc === 'small-group') { const q = questFor(k); if (q && !items.includes(q.name)) items.push(q.name); }\n    if (sc === 'individual' && personal && !items.includes(personal.name)) items.push(personal.name);\n  });\n  if (s.mistakes.length === 0 && a.challenge_extension) items.push('Challenge Extension');\n  return { name: s.name, id: s.id, percent: s.percent, items };\n});\nlet text = 'ReTeach plan for ' + info.course + ' (' + info.studentCount + ' students, avg ' + info.classAverage + '%)\\n\\n';\ntext += 'CLASS PATTERN\\n' + (diag.class_summary || '') + '\\n';\n(diag.misconceptions || []).forEach(m => { text += '- [' + m.scope + '] ' + m.concept + ' (' + m.students + ' students): ' + m.likely_misconception + ' | ' + m.evidence + '\\n'; });\ntext += '\\nONE ASSIGNMENT, PERSONAL PATHS: ' + (a.title || '') + '\\n' + (a.story_intro || '') + '\\nWhy: ' + (a.teacher_note || '') + '\\n';\nif (Array.isArray(a.checks) && a.checks.length) { text += '\\nSELF-CHECK FIXES (' + a.checks.length + '):\\n' + a.checks.map(c => '- ' + c).join('\\n') + '\\n'; }\ntext += '\\nWHO GETS WHAT (names never sent to the AI)\\n' + plan.map(p => p.name + ' (' + p.percent + '%): ' + p.items.join(' + ')).join('\\n') + '\\n';\ntext += '\\n=== CORE MISSION (everyone) ===\\n' + stepsText((a.core_mission || {}).steps);\nquests.forEach(q => { text += '\\n=== SIDE QUEST: ' + q.name + ' (' + q.for_whom + ') ===\\n' + stepsText(q.steps); });\nif (a.challenge_extension) { text += '\\n=== CHALLENGE EXTENSION (mastered students) ===\\n' + stepsText(a.challenge_extension.steps); }\nlet html = '<h2>' + esc(a.title) + '</h2><p>' + esc(a.story_intro) + '</p><h3>Core Mission (everyone)</h3>' + stepsHtml((a.core_mission || {}).steps);\nquests.forEach(q => { html += '<h3>Side Quest: ' + esc(q.name) + '</h3><p><em>' + esc(q.for_whom) + '</em></p>' + stepsHtml(q.steps); });\nif (a.challenge_extension) { html += '<h3>Challenge Extension</h3>' + stepsHtml(a.challenge_extension.steps); }\nconst stepsStudent = steps => (steps || []).map((s, i) => (i + 1) + '. ' + (s.story_beat ? s.story_beat + ' ' : '') + s.prompt + '\\n' + (s.choices || []).map(c => '   ' + c.label + ') ' + c.text).join('\\n') + '\\n').join('\\n');\nlet studentText = (a.story_intro || '') + '\\n\\n=== CORE MISSION (everyone) ===\\n' + stepsStudent((a.core_mission || {}).steps);\nquests.forEach(q => { studentText += '\\n=== SIDE QUEST: ' + q.name + ' ===\\n' + stepsStudent(q.steps); });\nif (a.challenge_extension) { studentText += '\\n=== CHALLENGE EXTENSION ===\\n' + stepsStudent(a.challenge_extension.steps); }\nstudentText += '\\nEveryone completes the Core Mission. Your teacher will tell you which Side Quest or Challenge is yours.';\nreturn [{ json: { studentText, title: a.title || 'ReTeach assignment', reviewText: text, canvasHtml: html, draftJson: JSON.stringify(a), teacherEmail: info.teacherEmail, plan } }];\n"
+      },
+      "name": "Build Plan for Review",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1660,
+        300
+      ],
+      "id": "c199e1f9-74fb-4a8d-94c1-b530dc86c3e0"
+    },
+    {
+      "parameters": {
+        "operation": "sendAndWait",
+        "sendTo": "={{ $json.teacherEmail }}",
+        "subject": "=ReTeach plan ready: {{ $json.title }}",
+        "message": "={{ $json.reviewText }}",
+        "responseType": "customForm",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Decision",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Approve and publish"
+                  },
+                  {
+                    "option": "Request changes"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Feedback",
+              "fieldType": "textarea",
+              "placeholder": "e.g. make the story more exciting"
+            }
+          ]
+        },
+        "options": {
+          "messageButtonLabel": "Review plan",
+          "responseFormTitle": "Approve or revise this plan",
+          "responseFormButtonLabel": "Send decision",
+          "appendAttribution": false
+        }
+      },
+      "name": "Ask Teacher to Approve",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1880,
+        300
+      ],
+      "webhookId": "f703d1ea-066b-4a09-9fc0-455c4a6c9023",
+      "credentials": {
+        "gmailOAuth2": {
+          "name": "Gmail account"
+        }
+      },
+      "id": "387fe317-2683-4fb2-8d1d-8f87186b7454"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.data?.Decision ?? $json.Decision ?? \"\" }}",
+              "operator": {
+                "type": "string",
+                "operation": "startsWith"
+              },
+              "rightValue": "Approve"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2100,
+        300
+      ],
+      "id": "1e59b378-34e0-4e29-b5d9-8d56379f855f"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://classroom.googleapis.com/v1/courses/YOUR_COURSE_ID/courseWork",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ title: $(\"Build Plan for Review\").first().json.title, description: $(\"Build Plan for Review\").first().json.studentText, workType: \"ASSIGNMENT\", state: \"DRAFT\", maxPoints: 10 }) }}",
+        "options": {}
+      },
+      "name": "Post to Google Classroom",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        2320,
+        200
+      ],
+      "disabled": true,
+      "id": "36b10ce4-7d3d-4cf4-9230-e18ff119d0fb"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $(\"Build Plan for Review\").first().json.teacherEmail }}",
+        "subject": "=Ready for Google Classroom: {{ $(\"Build Plan for Review\").first().json.title }}",
+        "emailType": "text",
+        "message": "=Approved! Paste this into Google Classroom (Classwork > Create > Assignment).\n\nTITLE: {{ $(\"Build Plan for Review\").first().json.title }}\n\n{{ $(\"Build Plan for Review\").first().json.studentText }}\n\n---\nWHO GETS WHAT (teacher only, do not post):\n{{ $(\"Build Plan for Review\").first().json.plan.map(p => p.name + ': ' + p.items.join(' + ')).join('\\n') }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "name": "Confirm Published",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        2540,
+        200
+      ],
+      "webhookId": "6b35b935-c043-4525-8745-a001bf061479",
+      "credentials": {
+        "gmailOAuth2": {
+          "name": "Gmail account"
+        }
+      },
+      "id": "739d5daf-f24b-4a38-9818-e0d175f8b06d"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "fb",
+              "name": "feedback",
+              "value": "={{ $json.data?.Feedback ?? $json.Feedback ?? \"Improve the draft\" }}",
+              "type": "string"
+            },
+            {
+              "id": "prev",
+              "name": "previousDraft",
+              "value": "={{ $(\"Build Plan for Review\").first().json.draftJson }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Collect Teacher Feedback",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2320,
+        420
+      ],
+      "id": "d46715ee-0df8-4f67-84f6-3b982fab4e90"
+    },
+    {
+      "parameters": {
+        "content": "## ReTeach: one assignment, personal paths\nStudents are grouped by WHICH mistake they made, not by score.\n- class-wide (30%+): Core Mission everyone does\n- small-group (2+): Side Quests\n- one-off errors: Personal Review; no mistakes: Challenge Extension\nThe AI only sees anonymized group counts, never individual students.\nSetup: OpenAI + Gmail credentials. Optional: enable Post to Google Classroom (Google OAuth2, scope classroom.coursework.students) and set YOUR_COURSE_ID.",
+        "height": 260,
+        "width": 560,
+        "color": 4
+      },
+      "name": "Setup Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "993101b1-e278-488b-b635-4b48aa3557d6"
+    }
+  ],
+  "connections": {
+    "Teacher Upload Form": {
+      "main": [
+        [
+          {
+            "node": "Read Quiz CSV",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Quiz CSV": {
+      "main": [
+        [
+          {
+            "node": "Anonymize & Group by Misconception",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anonymize & Group by Misconception": {
+      "main": [
+        [
+          {
+            "node": "Diagnose Misconceptions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Diagnose Misconceptions": {
+      "main": [
+        [
+          {
+            "node": "Write Core Mission + Side Quests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Core Mission + Side Quests": {
+      "main": [
+        [
+          {
+            "node": "Self-Check Accuracy",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Self-Check Accuracy": {
+      "main": [
+        [
+          {
+            "node": "Build Plan for Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Plan for Review": {
+      "main": [
+        [
+          {
+            "node": "Ask Teacher to Approve",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask Teacher to Approve": {
+      "main": [
+        [
+          {
+            "node": "Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post to Google Classroom": {
+      "main": [
+        [
+          {
+            "node": "Confirm Published",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Teacher Feedback": {
+      "main": [
+        [
+          {
+            "node": "Write Core Mission + Side Quests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved?": {
+      "main": [
+        [
+          {
+            "node": "Post to Google Classroom",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Collect Teacher Feedback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Diagnosis Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Diagnose Misconceptions",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Diagnosis Format": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Diagnose Misconceptions",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Writer Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Write Core Mission + Side Quests",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assignment Format": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Write Core Mission + Side Quests",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Checker Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Self-Check Accuracy",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Checked Format": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Self-Check Accuracy",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
